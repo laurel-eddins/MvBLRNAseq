@@ -1,0 +1,35 @@
+#!/bin/bash
+#SBATCH --job-name=trimmomatic
+#SBATCH -c 12
+#SBATCH -n 1
+#SBATCH -N 1
+#SBATCH -a 0-7
+#SBATCH --partition=general
+#SBATCH --qos=general
+#SBATCH --mail-type=END
+#SBATCH --mem=5G
+#SBATCH --mail-user=wmx15001@uconn.edu
+#SBATCH -o %x_%A_%a.out
+#SBATCH -e %x_%A_%a.err
+
+module load Trimmomatic/0.39
+
+INDIR=/home/FCAM/leddins/MvDevExpression_rep/fasta_files
+
+# Only ONE read file per sample now
+reads=($INDIR/GZNGLX_1_MvBL_Development_1_PL.fastq.gz $INDIR/GZNGLX_2_MvBL_Development_1_CT.fastq.gz $INDIR/GZNGLX_3_MvBL_Development_2_PL.fastq.gz $INDIR/GZNGLX_4_MvBL_Development_2_CT.fastq.gz $INDI>
+
+output=(MvBL_Development_1_PL_1 MvBL_Development_1_PL_2 MvBL_Development_1_PL_3 MvBL_Development_1_CT_1 MvBL_Development_1_CT_2 MvBL_Development_1_CT_3 MvBL_Development_2_PL_1 MvBL_Development_2_PL_2 MvBL_Development_2_PL_3 MvBL_Development_2_CT_1 MvBL_Development_2_CT_2 MvBL_Development_2_CT_3 MvBL_Development_3_PL_1 MvBL_Development_3_PL_2 MvBL_Development_3_PL_3 MvBL_Development_3_CT_1 MvBL_Development_3_CT_2 MvBL_Development_3_CT_3 MvBL_Development_4_PL_1 MvBL_Development_4_PL_2 MvBL_Development_4_PL_3 MvBL_Development_4_CT_1 MvBL_Development_4_CT_2 MvBL_Development_4_CT_3) 
+
+mkdir -p /home/FCAM/leddins/MvDevExpression_rep/trimming_and_qc/trimming_out
+cd /home/FCAM/leddins/MvDevExpression_rep/trimming_and_qc/trimming_out
+
+java -jar $Trimmomatic SE -threads 8 -phred33 \
+    ${reads[$SLURM_ARRAY_TASK_ID]} \
+    ${output[$SLURM_ARRAY_TASK_ID]}.trimmed.fastq.gz \
+    ILLUMINACLIP:/isg/shared/apps/Trimmomatic/0.36/adapters/TruSeq3-SE.fa:2:30:10 \
+    LEADING:5 \
+    TRAILING:5 \
+    SLIDINGWINDOW:4:20 \
+    MINLEN:45
+
