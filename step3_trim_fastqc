@@ -1,0 +1,27 @@
+#!/bin/bash 
+#SBATCH --job-name=fastqc
+#SBATCH -n 1
+#SBATCH -N 1
+#SBATCH -c 6
+#SBATCH --mem=32G
+#SBATCH --qos=general
+#SBATCH --partition=general
+#SBATCH --mail-user=wmx25001@uconn.edu
+#SBATCH --mail-type=END
+#SBATCH -o %x_%j.out
+#SBATCH -e %x_%j.err
+
+hostname
+date
+
+# load software
+module load fastqc
+
+# create output directory
+OUTDIR=/home/FCAM/leddins/MvDevExpression_rep/trimming_and_qc/step3_out
+mkdir -p $OUTDIR
+
+# run fastqc. "*fq" tells it to run on all fastq files in directory
+find /home/FCAM/leddins/MvDevExpression_rep/trimming_and_qc/trimming_out  -name '*trimmed.fastq.gz' -exec fastqc -t 6 -o $OUTDIR {} \;
+
+date
