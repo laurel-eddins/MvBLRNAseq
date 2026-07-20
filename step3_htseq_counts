@@ -1,0 +1,66 @@
+#!/bin/bash
+#SBATCH --job-name=htseq_count
+#SBATCH -n 1
+#SBATCH -N 1
+#SBATCH -c 1
+#SBATCH --mem=20G
+#SBATCH --partition=general
+#SBATCH --qos=general
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=firstname.lastname@uconn.edu
+#SBATCH -o %x_%j.out
+#SBATCH -e %x_%j.err
+
+echo `hostname`
+
+# Generate Counts
+
+module load htseq
+
+GTF=/home/FCAM/leddins/MvDevExpression/fasta_files/MvBLg_v2.0.gtf
+
+INDIR=/home/FCAM/leddins/MvDevExpression_rep/genome_index/hisat2_alignment
+OUTDIR=/home/FCAM/leddins/MvDevExpression_rep/genome_index/Step3_HTseq_counts_out
+
+mkdir -p $OUTDIR
+
+samples=(
+MvBL_CT_7mm_1
+MvBL_CT_7mm_2
+MvBL_CT_7mm_3
+MvBL_CT_10mm_1
+MvBL_CT_10mm_2
+MvBL_CT_10mm_3
+MvBL_CT_15mm_1
+MvBL_CT_15mm_2
+MvBL_CT_15mm_3
+MvBL_CT_23mm_1
+MvBL_CT_23mm_2
+MvBL_CT_23mm_3
+MvBL_PL_7mm_1
+MvBL_PL_7mm_2
+MvBL_PL_7mm_3
+MvBL_PL_10mm_1
+MvBL_PL_10mm_2
+MvBL_PL_10mm_3
+MvBL_PL_15mm_1
+MvBL_PL_15mm_2
+MvBL_PL_15mm_3
+MvBL_PL_23mm_1
+MvBL_PL_23mm_2
+MvBL_PL_23mm_3
+)
+
+for sample in ${samples[@]}
+do
+
+echo "Counting reads for ${sample}"
+
+htseq-count -s no -r pos -f bam \
+    $INDIR/${sample}.bam \
+    $GTF \
+    > $OUTDIR/${sample}.counts
+
+echo "${sample} complete"
+
+done
