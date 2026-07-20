@@ -1,0 +1,29 @@
+#!/bin/bash
+#SBATCH --job-name=hisat2_index
+#SBATCH -n 1
+#SBATCH -N 1
+#SBATCH -c 4
+#SBATCH --mem=3G
+#SBATCH --partition=general
+#SBATCH --qos=general
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=wmx25001@uconn.edu
+#SBATCH -o %x_%j.out
+#SBATCH -e %x_%j.err
+
+echo `hostname`
+date
+
+# Index the genome for hisat using the genome fasta file as input. The genome fasta file can be obtained from Mimubase
+
+module load python
+# load software
+module load hisat2/2.2.0
+
+# input/output directories
+OUTDIR=/home/FCAM/leddins/MvDevExpression_rep/genome_index/MvBL_hisat2_index
+
+GENOME=/home/FCAM/leddins/MvDevExpression/fasta_files/MvBLg_v2.0.fa
+
+
+hisat2-build -p 4 $GENOME $OUTDIR/MvBL
