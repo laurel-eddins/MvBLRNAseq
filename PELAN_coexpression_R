@@ -1,0 +1,649 @@
+library(tidyverse)
+library(igraph)
+library(ggraph)
+library(readxl)
+library(patchwork)
+library(RColorBrewer)
+library(viridis)
+library(stringr)
+set.seed(666)
+
+#Load expression matrix 
+Exp_table <- read_csv("MvBL_VST_expression_matrix.csv", col_types = cols())
+head(Exp_table)
+dim(Exp_table)
+
+#Load metadata 
+Metadata <- read_csv("RNAseq_metadata.csv")
+head(Metadata)
+dim(Metadata)
+
+#Load bait genes 
+Baits <- read_csv("bait_genes.csv", col_types = cols())
+head(Baits)
+
+#pivot expression table for PCA plotting 
+Exp_table_long <- Exp_table %>% 
+  rename(gene_ID = `...1`) %>% 
+  pivot_longer(cols = !gene_ID, names_to = "library", values_to = "tpm") %>% 
+  mutate(logTPM = log10(tpm + 1)) 
+
+#logTPM counts for PCA 
+Exp_table_log_wide <- Exp_table_long %>% 
+  select(gene_ID, library, logTPM) %>% 
+  pivot_wider(names_from = library, values_from = logTPM)
+
+#create PCA matrix
+my_pca <- prcomp(t(Exp_table_log_wide[, -1]))
+pc_importance <- as.data.frame(t(summary(my_pca)$importance))
+head(pc_importance, 20)
+
+Metadata <- Metadata %>%
+  mutate(Run = sample)
+
+#generate PCA coordinates
+PCA_coord <- my_pca$x[, 1:10] %>% 
+  as.data.frame() %>% 
+  mutate(Run = row.names(.)) %>% 
+  full_join(Metadata %>% 
+              select(Run, tissue, stage, replicate), by = "Run")
+
+head(PCA_coord)
+
+#plot PCA
+PCA_by_tissue_stage <- PCA_coord %>% 
+  ggplot(aes(x = PC1, y = PC2)) +
+  geom_point(aes(fill = factor(stage), shape = tissue), 
+             size = 3, 
+             alpha = 0.8) +
+  scale_fill_brewer(palette = "Spectral") +
+  scale_shape_manual(values = c(CT = 21, PL = 22)) +
+  labs(x = paste("PC1 (", pc_importance[1, 2] %>% signif(3)*100, "% of Variance)", sep = ""), 
+       y = paste("PC2 (", pc_importance[2, 2] %>% signif(3)*100, "% of Variance)", "  ", sep = ""),
+       fill = "Stage",
+       shape = "Tissue") +  
+  theme_classic() +
+  guides(fill = guide_legend(override.aes = list(shape = 21))) +
+  theme(
+    text = element_text(size= 14),
+    axis.text = element_text(color = "black")
+    )
+PCA_by_tissue_stage
+
+#COEXPRESSION 
+#Averaging replicates
+Exp_table_long_averaged <- Exp_table_long %>% 
+  full_join(PCA_coord %>% 
+              select(Run, tissue, stage), 
+            by = c("library"="Run")) %>% 
+  group_by(gene_ID, tissue, stage) %>% 
+  summarise(mean.logTPM = mean(logTPM)) %>% 
+  ungroup()  
+
+head(Exp_table_long_averaged)
+
+#z score testing 
+Exp_table_long_averaged_z <- Exp_table_long_averaged %>% 
+  group_by(gene_ID) %>% 
+  mutate(z.score = (mean.logTPM - mean(mean.logTPM))/sd(mean.logTPM)) %>% 
+  ungroup()
+
+head(Exp_table_long_averaged_z)
+
+#select high variance genes 
+high_var_genes <- Exp_table_long_averaged_z %>% 
+  group_by(gene_ID) %>% 
+  summarise(var = var(mean.logTPM)) %>% 
+  ungroup() %>% 
+  filter(var > quantile(var, 0.667))
+
+head(high_var_genes)
+dim(high_var_genes)
+
+#select top 5000 
+high_var_genes5000 <- high_var_genes %>% 
+  slice_max(order_by = var, n = 5000) 
+head(high_var_genes5000)
+
+#Replacing 1 with gene number, check to see if baits are in top 5000 variable genes 
+high_var_genes5000 %>% 
+  filter(str_detect(gene_ID, Baits$gene[1])) 
+
+#Apply highly variable genes to expression matrix 
+Exp_table_long_averaged_z_high_var <- Exp_table_long_averaged_z %>% 
+  filter(gene_ID %in% high_var_genes5000$gene_ID)
+head(Exp_table_long_averaged_z_high_var)
+Exp_table_long_averaged_z_high_var %>% 
+  group_by(gene_ID) %>% 
+  count() %>% 
+  nrow()
+
+#add back sample ID
+Exp_table_long_averaged_z_high_var <- Exp_table_long_averaged_z_high_var %>%
+  mutate(sample_ID = paste0(tissue, "_", stage))
+
+head(Exp_table_long_averaged_z_high_var)
+
+#move from long to wide to create vector 
+z_score_wide <- Exp_table_long_averaged_z_high_var %>% 
+  select(gene_ID, sample_ID, z.score) %>% 
+  pivot_wider(names_from = sample_ID, values_from = z.score) %>% 
+  as.data.frame()
+
+row.names(z_score_wide) <- z_score_wide$gene_ID
+head(z_score_wide)
+cor_matrix <- cor(t(z_score_wide[, -1]))
+dim(cor_matrix)
+
+number_of_tissue_stage <- ncol(z_score_wide) - 1
+number_of_tissue_stage
+
+#Remove redundant data 
+cor_matrix_upper_tri <- cor_matrix
+cor_matrix_upper_tri[lower.tri(cor_matrix_upper_tri)] <- NA
+
+#Calculate t-statistic for the upper tri 
+edge_table <- cor_matrix_upper_tri %>% 
+  as.data.frame() %>% 
+  mutate(from = row.names(cor_matrix)) %>% 
+  pivot_longer(cols = !from, names_to = "to", values_to = "r") %>% 
+  filter(is.na(r) == F) %>% 
+  filter(from != to) %>% 
+  mutate(t = r*sqrt((number_of_tissue_stage-2)/(1-r^2))) %>% 
+  mutate(p.value = case_when(
+    t > 0 ~ pt(t, df = number_of_tissue_stage-2, lower.tail = F),
+    t <=0 ~ pt(t, df = number_of_tissue_stage-2, lower.tail = T)
+  )) %>% 
+  mutate(FDR = p.adjust(p.value, method = "fdr")) 
+
+head(edge_table)
+
+#Check R cutoff using bait genes 
+edge_table %>% 
+  filter(from %in% Baits$gene &
+           to %in% Baits$gene)
+
+#generate edge table histogram 
+edge_table %>% 
+  slice_sample(n = 20000) %>% 
+  ggplot(aes(x = r)) +
+  geom_histogram(color = "white", bins = 100) +
+  geom_vline(xintercept = 0.7, color = "tomato1", size = 1.2) +
+  theme_classic() +
+  theme(
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black")
+  )
+
+#filter using r value >0.7
+edge_table_select <- edge_table %>% 
+  filter(abs(r) >= 0.7)
+
+dim(edge_table_select)
+
+
+#MODULE DETECTION
+MvBL_funct_anno <- read_tsv("MvBLg_v2.0_functional_annotations_simple.tsv", col_types = cols())
+MvBL_funct_anno <- MvBL_funct_anno %>%
+  mutate(gene_ID = sub("\\..*$", "", gene_ID))
+head(MvBL_funct_anno)
+
+node_table <- data.frame(
+  gene_ID = c(edge_table_select$from, edge_table_select$to) %>% unique()
+) %>% 
+  left_join(MvBL_funct_anno, by = c("gene_ID"="gene_ID"))
+
+#remove duplicates
+node_table <- node_table %>%
+  distinct(gene_ID, .keep_all = TRUE)
+
+head(node_table)
+dim(node_table)
+
+my_network <- graph_from_data_frame(
+  edge_table_select,
+  vertices = node_table,
+  directed = F
+)
+
+#graph based clustering
+modules <- cluster_leiden(my_network, resolution_parameter = 1.5, 
+                          objective_function = "modularity")
+
+#optimizing resolution
+optimize_resolution <- function(network, resolution){
+  modules = network %>% 
+    cluster_leiden(resolution_parameter = resolution,
+                   objective_function = "modularity")
+  
+  parsed_modules = data.frame(
+    gene_ID = names(membership(modules)),
+    module = as.vector(membership(modules)) 
+  )
+  
+  num_module_5 = parsed_modules %>% 
+    group_by(module) %>% 
+    count() %>% 
+    arrange(-n) %>% 
+    filter(n >= 5) %>% 
+    nrow() %>% 
+    as.numeric()
+  
+  num_genes_contained = parsed_modules %>% 
+    group_by(module) %>% 
+    count() %>% 
+    arrange(-n) %>% 
+    filter(n >= 5) %>% 
+    ungroup() %>% 
+    summarise(sum = sum(n)) %>% 
+    as.numeric()
+  
+  c(num_module_5, num_genes_contained)
+  
+}
+
+optimization_results <- purrr::map_dfc(
+  .x = seq(from = 0.25, to = 5, by = 0.25),
+  .f = optimize_resolution, 
+  network = my_network
+) %>% 
+  t() %>% 
+  cbind(
+    resolution = seq(from = 0.25, to = 5, by = 0.25)
+  ) %>% 
+  as.data.frame() %>% 
+  rename(num_module = V1,
+         num_contained_gene = V2)
+
+head(optimization_results)
+
+#and graph optimization results 
+Optimize_num_module <- optimization_results %>% 
+  ggplot(aes(x = resolution, y = num_module)) +
+  geom_line(size = 1.1, alpha = 0.8, color = "dodgerblue2") +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_vline(xintercept = 2, size = 1, linetype = 4) +
+  labs(x = "resolution parameter",
+       y = "num. modules\nw/ >=5 genes") +
+  theme_classic() +
+  theme(
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black")
+  )
+
+Optimize_num_gene <- optimization_results %>% 
+  ggplot(aes(x = resolution, y = num_contained_gene)) +
+  geom_line(size = 1.1, alpha = 0.8, color = "violetred2") +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_vline(xintercept = 2, size = 1, linetype = 4) +
+  labs(x = "resolution parameter",
+       y = "num. genes in\nmodules w/ >=5 genes") +
+  theme_classic() +
+  theme(
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black")
+  )
+
+wrap_plots(Optimize_num_module, Optimize_num_gene, nrow = 2)
+
+
+#Link module memberiship to gene ID 
+my_network_modules <- data.frame(
+  gene_ID = names(membership(modules)),
+  module = as.vector(membership(modules)) 
+) 
+
+my_network_modules %>% 
+  group_by(module) %>% 
+  count() %>% 
+  arrange(-n) %>% 
+  filter(n >= 5)
+
+my_network_modules %>% 
+  group_by(module) %>% 
+  count() %>% 
+  arrange(-n) %>% 
+  filter(n >= 5) %>% 
+  ungroup() %>% 
+  summarise(sum = sum(n))
+
+#check to see if bait genes are in the same module 
+my_network_modules %>% 
+  filter(gene_ID == "MV4G085300" |
+        gene_ID == "MV4G340600" |
+          gene_ID == "MV6G102000" |
+          gene_ID == "MV6G363500")
+
+#generate into about module-tissue-stage correspondance 
+Exp_table_long_averaged_z_high_var_modules <- Exp_table_long_averaged_z_high_var %>% 
+  inner_join(my_network_modules, by = "gene_ID")
+
+head(Exp_table_long_averaged_z_high_var_modules)
+
+#generate summary stat and module peaks 
+modules_mean_z <- Exp_table_long_averaged_z_high_var_modules %>% 
+  group_by(module, stage, tissue, sample_ID) %>% 
+  summarise(mean.z = mean(z.score)) %>% 
+  ungroup()
+
+head(modules_mean_z)
+
+module_peak_exp <- modules_mean_z %>% 
+  group_by(module) %>% 
+  slice_max(order_by = mean.z, n = 1)
+
+module_peak_exp
+
+#generate line graph to further QC modules 3 and 7 
+
+module_line_plot <- Exp_table_long_averaged_z_high_var_modules %>% 
+  mutate(stage = factor(stage, levels = c(7, 10, 15, 23))) %>% 
+  filter(module %in% c(3,7)) %>% 
+  ggplot(aes(x = stage, y = z.score)) +
+  facet_grid(module ~ tissue) +
+  geom_line(aes(group = gene_ID), alpha = 0.3, color = "grey70") +
+  geom_line(
+    data = modules_mean_z %>% 
+      filter(module %in% c(3,7)) %>%
+      mutate(stage = factor(stage, levels = c(7, 10, 15, 23))),
+    aes(y = mean.z, group = module), 
+    size = 1.1, 
+    alpha = 0.8
+  ) +
+  labs(x = NULL,
+       y = "z score") +
+  theme_classic() +
+  theme(
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black")
+  )
+
+module_lines_color_strip <- expand.grid(
+  tissue = unique(Metadata$tissue),
+  stage = unique(Metadata$stage), 
+  stringsAsFactors = FALSE
+) %>% 
+  mutate(stage = factor(stage, levels = c(7, 10, 15, 23))) %>% 
+  ggplot(aes(x = stage, y = 1)) +
+  facet_grid(. ~ tissue) +
+  geom_tile(aes(fill = stage)) +
+  scale_fill_viridis_d(option = "D") +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_blank(),
+    text = element_text(size = 14),
+    panel.spacing = unit(1, "lines")
+  )
+wrap_plots(module_line_plot, module_lines_color_strip,
+           nrow = 2, heights = c(1, 0.08))
+
+#heat map to represent clusters 
+#check outliers 
+modules_mean_z$mean.z %>% summary()
+modules_mean_z <- modules_mean_z %>% 
+  mutate(mean.z.clipped = case_when(
+    mean.z > 1.8 ~ 1.8,
+    mean.z < -1.8 ~ -1.8,
+    T ~ mean.z
+  ))
+
+#reorder rows and columns 
+modules_mean_z <- modules_mean_z %>% 
+  mutate(stage = factor(stage, levels = c(7, 10, 15, 23)))
+head(modules_mean_z)
+unique(modules_mean_z$stage)
+
+module_peak_exp <- module_peak_exp %>% 
+  mutate(order_y = case_when(
+    stage == 7 ~ 1,
+    stage == 10 ~ 2,
+    stage == 15 ~ 3,
+    stage == 23 ~ 4
+  )) %>% 
+  mutate(peak_exp = reorder(stage, order_y))
+modules_mean_z_reorded <- modules_mean_z %>% 
+  full_join(module_peak_exp %>% 
+              select(module, peak_exp, order_y), 
+            by = c("module")) %>% 
+  mutate(module = reorder(module, -order_y))
+
+#generate heatmaps 
+module_heatmap <- modules_mean_z_reorded %>% 
+  filter(module %in% 1:16) %>%
+  mutate(stage = factor(stage, levels = c(7, 10, 15, 23)),
+         module = factor(module, levels = 1:16)) %>%
+  ggplot(aes(x = tissue, y = as.factor(module))) +
+  facet_grid(. ~ stage, scales = "free", space = "free") +
+  geom_tile(aes(fill = mean.z.clipped), color = "grey80") +
+  scale_fill_gradientn(colors = rev(brewer.pal(11, "RdBu")), 
+                       limits = c(-1.5, 1.5),
+                       breaks = c(-1.5, 0, 1.5), 
+                       labels = c("< -1.5", "0", "> 1.5")) +
+  labs(x = NULL,
+       y = "Module",
+       fill = "z score") +
+  theme_classic() +
+  theme(
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_blank(),
+    strip.text = element_blank(),
+    legend.position = "top",
+    panel.spacing = unit(0.5, "lines")
+  )
+
+
+heatmap_color_strip1 <- expand.grid(
+  tissue = unique(Metadata$tissue),
+  stage = unique(Metadata$stage), 
+  stringsAsFactors = FALSE
+) %>% 
+  mutate(stage = factor(stage, levels = c(7, 10, 15, 23))) %>%
+  ggplot(aes(x = tissue, y = 1)) +
+  facet_grid(. ~ stage, scales = "free", space = "free") +
+  geom_tile(aes(fill = tissue)) +
+  scale_fill_manual(values = brewer.pal(8, "Set2")) +
+  guides(fill = guide_legend(nrow = 1)) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_blank(),
+    text = element_text(size = 14),
+    panel.spacing = unit(0.5, "lines"),
+    legend.key.height = unit(0.75, "lines")
+  )
+
+
+heatmap_color_strip2 <- expand.grid(
+  tissue = unique(Metadata$tissue),
+  stage = unique(Metadata$stage), 
+  stringsAsFactors = FALSE
+) %>% 
+  mutate(stage = factor(stage, levels = c(7, 10, 15, 23))) %>%
+  ggplot(aes(x = tissue, y = 1)) +
+  facet_grid(. ~ stage, scales = "free", space = "free") +
+  geom_tile(aes(fill = stage)) +
+  scale_fill_manual(values = viridis::viridis(4, option = "D")) +
+  labs(fill = "stage") +
+  guides(fill = guide_legend(nrow = 1)) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    strip.text = element_blank(),
+    text = element_text(size = 14),
+    panel.spacing = unit(0.5, "lines"),
+    legend.key.height = unit(0.75, "lines")
+  )
+
+
+wrap_plots(module_heatmap, 
+           heatmap_color_strip1, 
+           heatmap_color_strip2, 
+           nrow = 3, 
+           heights = c(1, 0.08, 0.08), 
+           guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical"
+  )
+
+#Coexpression graphs for neighbors of bait 
+neighbors_of_bait <- c(
+  neighbors(my_network, v = "MV4G085300"), # PELAN
+  neighbors(my_network, v = "MV4G340600"), # DFR 
+  neighbors(my_network, v = "MV6G102000"), #  ANS
+  neighbors(my_network, v = "MV6G363500") # F3Ha
+) %>% 
+  unique()  
+
+length(neighbors_of_bait)  
+
+#generate sub-network 
+subnetwork_edges <- edge_table_select %>% 
+  filter(from %in% names(neighbors_of_bait) &
+           to %in% names(neighbors_of_bait)) %>% 
+  group_by(from) %>% 
+  slice_max(order_by = r, n = 5) %>% 
+  ungroup() %>% 
+  group_by(to) %>% 
+  slice_max(order_by = r, n = 5) %>% 
+  ungroup()
+
+subnetwork_genes <- c(subnetwork_edges$from, subnetwork_edges$to) %>% unique()
+length(subnetwork_genes)
+dim(subnetwork_edges)
+
+#subset nodes 
+subnetwork_nodes <- node_table %>% 
+  filter(gene_ID %in% subnetwork_genes) %>% 
+  left_join(my_network_modules, by = "gene_ID") %>% 
+  left_join(module_peak_exp, by = "module") %>% 
+  mutate(module_annotation = case_when(
+    str_detect(module, "7") ~ "anthocyanin",
+    module == "7" ~ "anthocyanin",
+    T ~ "other"
+  ))
+
+dim(subnetwork_nodes)
+
+my_subnetwork <- graph_from_data_frame(subnetwork_edges,
+                                       vertices = subnetwork_nodes,
+                                       directed = F)
+#graph sub-network 
+my_subnetwork %>% 
+  ggraph(layout = "kk", circular = F) +
+  geom_edge_link(color = "grey70", width = 0.5, alpha = 0.5) +
+  geom_node_point(alpha = 0.8, color = "white", shape = 21, size = 2,
+                  aes(fill = module_annotation))
+
+#Find bait neighbors 
+neighbors_of_bait <- c(
+  neighbors(my_network, v = "MV4G085300"), # PELAN
+  neighbors(my_network, v = "MV4G340600"), # DFR 
+  neighbors(my_network, v = "MV6G102000"), #  ANS
+  neighbors(my_network, v = "MV6G363500") # F3Ha
+) %>% 
+  unique()  
+
+length(neighbors_of_bait)
+
+my_network_modules <- my_network_modules %>%
+  left_join(node_table, by = "gene_ID")
+
+neighbor_TFs <- my_network_modules %>% 
+  filter(gene_ID %in% names(neighbors_of_bait)) %>% 
+  filter(str_detect(funcion, "transcription factor"))%>% 
+  filter(str_detect(funcion, "squamosa"))
+
+#graph neighbor TFs
+TF_neighbors_of_bait <- Exp_table_long %>% 
+  filter(gene_ID %in% neighbor_TFs$gene_ID) %>% 
+  inner_join(PCA_coord, by = c("library" = "Run")) %>% 
+  mutate(stage = factor(stage, levels = c(7, 10, 15, 23))) %>% 
+  mutate(tag = gene_ID) %>% 
+  ggplot(aes(x = stage, y = logTPM)) +
+  facet_grid(tag ~ tissue, scales = "free_y") +
+  geom_point(aes(fill = tissue), 
+             color = "white", 
+             size = 2, 
+             alpha = 0.8, 
+             shape = 21, 
+             position = position_jitter(0.1, seed = 666)) +
+  stat_summary(
+    geom = "line", 
+    aes(group = gene_ID), 
+    fun = mean, 
+    alpha = 0.8, 
+    size = 1.1, 
+    color = "grey20"
+  ) +
+  scale_fill_manual(values = brewer.pal(8, "Set2")) +
+  labs(
+    x = NULL,
+    y = "log10(TPM)"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    panel.spacing = unit(1, "lines"),
+    text = element_text(size = 14),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_blank(),
+    axis.text.y = element_text(angle = 0, hjust = 1),
+    strip.background = element_blank()
+  )
+
+
+wrap_plots(TF_neighbors_of_bait, module_lines_color_strip, 
+           nrow = 2, 
+           heights = c(1, 0.05))
+
+#write csv 
+write.csv(neighbor_TFs, "bait_gene_neighbors.csv", row.names = FALSE)
+
+#find neghbors of just pelan
+neighbors_of_PELAN <- c(
+  neighbors(my_network, v = "MV4G085300") # PELAN
+) %>% 
+  unique()  
+length(neighbors_of_PELAN)
+
+my_network_modules <- my_network_modules %>%
+  left_join(node_table, by = "gene_ID")
+
+PELAN_neighbor_TFs <- my_network_modules %>% 
+  filter(gene_ID %in% names(neighbors_of_PELAN)) %>% 
+  filter(str_detect(funcion.x.x, "transcription factor"))
+
+length(PELAN_neighbor_TFs)
+
+write.csv(my_network_modules, "network_modules.csv", row.names = FALSE)
+
+#combine network info with eggnog annotations 
+#read eggnog file
+networkannotations_eggnog <- read_csv("/Users/laureleddins/Desktop/Yuan Lab/PELANpro CRISPR/MvBL_RNAseq_replicates/coexpression_analysis/eggnog/network_annotations_eggnog.csv")
+
+#remove .1 on eggnog 
+networkannotations_eggnog <- networkannotations_eggnog %>%
+  rename(gene_ID = `#query`)
+networkannotations_eggnog <- networkannotations_eggnog %>%
+  mutate(gene_ID = str_remove(gene_ID, "\\.\\d+$"))
+
+
+PELAN_neighbors_annotations <- networkannotations_eggnog %>%
+  filter(gene_ID %in% names(neighbors_of_PELAN))  
+
+#generate only TFs
+PELAN_neighbors_annotations_TFs <- PELAN_neighbors_annotations %>%
+  filter(
+    coalesce(str_detect(COG_category, "K"), FALSE) |
+      coalesce(str_detect(Description, regex("transcription", ignore_case = TRUE)), FALSE)
+  )
+
+#combine with counts 
+avg_counts <- read.csv("/Users/laureleddins/Desktop/Yuan Lab/PELANpro CRISPR/MvBL_RNAseq_replicates/coexpression_analysis/average_normalized_counts.csv")
+PELAN_neighbor_TFs_eggnog_counts <- inner_join(PELAN_neighbors_annotations_TFs, avg_counts, by="gene_ID")
+
+write.csv(PELAN_neighbor_TFs_eggnog_counts, "PELAN_neighbor_TFs_eggnog_counts.csv", row.names = FALSE)
+       
