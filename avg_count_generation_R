@@ -1,0 +1,96 @@
+library(tidyverse)
+library(DESeq2)
+
+#Read HTSeq files
+count_list <- lapply(files, function(x) {
+  read.table(x,
+             header = FALSE,
+             stringsAsFactors = FALSE,
+             col.names = c("gene_ID", "count"))
+})
+
+# build count matrix
+count_matrix <- Reduce(function(x, y) {
+  full_join(x, y, by = "gene_ID")
+}, count_list)
+
+# rename count columns
+colnames(count_matrix)[-1] <- basename(files) %>%
+  str_remove("\\.counts$")
+
+
+# remove HTSeq summary rows
+count_matrix <- count_matrix %>%
+  filter(!str_detect(gene_ID, "^__"))
+
+# Set gene IDs as row names
+rownames(count_matrix) <- count_matrix$gene_ID
+count_matrix$gene_ID <- NULL
+
+# convert to numeric matrix
+count_matrix <- count_matrix %>%
+  mutate(across(everything(), as.numeric))
+
+count_matrix <- as.matrix(count_matrix)
+
+# DESeq2 normalization
+dds <- DESeqDataSetFromMatrix(
+  countData = round(count_matrix),
+  colData = data.frame(
+    row.names = colnames(count_matrix),
+    sample = colnames(count_matrix)
+  ),
+  design = ~1
+)
+
+dds <- estimateSizeFactors(dds)
+
+normalized_counts <- counts(dds, normalized = TRUE)
+
+# Convert normalized counts back to table
+normalized_counts_long <- as.data.frame(normalized_counts) %>%
+  rownames_to_column("gene_ID") %>%
+  pivot_longer(
+    cols = -gene_ID,
+    names_to = "sample",
+    values_to = "normalized_count"
+  )
+
+# create condition name 
+normalized_counts_long <- normalized_counts_long %>%
+  mutate(condition = str_remove(sample, "_[1-4]$"))
+
+# Average replicates
+normalized_counts_avg <- normalized_counts_long %>%
+  group_by(gene_ID, condition) %>%
+  summarize(
+    mean_normalized_count = mean(normalized_count),
+    .groups = "drop"
+  )
+
+# Make wide expression table
+normalized_counts_avg_wide <- normalized_counts_avg %>%
+  pivot_wider(
+    names_from = condition,
+    values_from = mean_normalized_count
+  )
+sample_order <- normalized_counts_avg_wide %>%
+  names() %>%
+  .[-1] %>%
+  tibble(sample = .) %>%
+  mutate(
+    stage = as.numeric(str_extract(sample, "\\d+")),
+    tissue = str_extract(sample, "CT|PL")
+  ) %>%
+  arrange(stage, tissue) %>%
+  pull(sample)
+
+normalized_counts_avg_wide <- normalized_counts_avg_wide %>%
+  select(gene_ID, all_of(sample_order))
+
+write.csv(
+  normalized_counts_avg_wide,
+  "average_normalized_counts.csv",
+  row.names = FALSE
+)
+
