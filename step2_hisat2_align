@@ -1,0 +1,69 @@
+#!/bin/bash
+#SBATCH --job-name=hisat_alignment
+#SBATCH -n 1
+#SBATCH -N 1
+#SBATCH -c 8
+#SBATCH --mem=20G
+#SBATCH --partition=general
+#SBATCH --qos=general
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=wmx25001@uconn.edu
+#SBATCH -o %x_%j.out
+#SBATCH -e %x_%j.err
+
+echo `hostname`
+
+# Aligning trimmed reads to genome with HISAT2, followed by sorting and indexing
+
+module load hisat2/2.2.0
+module load samtools
+module load python/2.7
+module load openssl/1.0
+
+INDEX=/home/FCAM/leddins/MvDevExpression_rep/genome_index/MvBL_hisat2_index/MvBL
+INDIR=/home/FCAM/leddins/MvDevExpression_rep/trimming_and_qc/trimming_out
+OUTDIR=/home/FCAM/leddins/MvDevExpression_rep/genome_index/hisat2_alignment
+
+mkdir -p $OUTDIR
+
+samples=(
+MvBL_CT_7mm_1
+MvBL_CT_7mm_2
+MvBL_CT_7mm_3
+MvBL_CT_10mm_1
+MvBL_CT_10mm_2
+MvBL_CT_10mm_3
+MvBL_CT_15mm_1
+MvBL_CT_15mm_2
+MvBL_CT_15mm_3
+MvBL_CT_23mm_1
+MvBL_CT_23mm_2
+MvBL_CT_23mm_3
+MvBL_PL_7mm_1
+MvBL_PL_7mm_2
+MvBL_PL_7mm_3
+MvBL_PL_10mm_1
+MvBL_PL_10mm_2
+MvBL_PL_10mm_3
+MvBL_PL_15mm_1
+MvBL_PL_15mm_2
+MvBL_PL_15mm_3
+MvBL_PL_23mm_1
+MvBL_PL_23mm_2
+MvBL_PL_23mm_3
+)
+for sample in ${samples[@]}
+do
+
+echo "Starting alignment for ${sample}"
+
+hisat2 -p 8 --dta -x $INDEX \
+    -U $INDIR/${sample}.trimmed.fastq.gz | \
+    samtools view -@ 8 -S -h -u - | \
+    samtools sort -@ 8 -T ${sample}- > $OUTDIR/${sample}.bam
+
+samtools index $OUTDIR/${sample}.bam
+
+echo "${sample} complete"
+
+done
